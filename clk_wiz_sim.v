@@ -9,7 +9,8 @@ module print_freq_after_lock #(
 ) (
     input [8*9:1] name,
     input clk,
-    input locked
+    input locked,
+    output reg pass = 0
 );
   function real abs;
     input real in;
@@ -21,6 +22,8 @@ module print_freq_after_lock #(
   real falling_edge;
   real freq = -1;
   real duty = -1;
+  reg freq_pass = 0;
+  reg duty_pass = 0;
   reg printed = 0;
   integer i;
   integer cycles_to_measure = 10;
@@ -40,8 +43,11 @@ module print_freq_after_lock #(
             name, freq, duty);
             if (expected_freq > 0 && abs(expected_freq - freq) > allowed_err) $display("WARNING: %s frequency deviated from expectation, %0.3f instead of %0.3f!", 
                 name, freq, expected_freq);
+            else freq_pass = 1;
             if (expected_duty > 0 && abs(expected_duty - duty) > allowed_err) $display("WARNING: %s duty cycle deviated from expectation, %0.3f instead of %0.3f!", 
                 name, duty, expected_duty);
+            else duty_pass = 1;
+            pass = freq_pass & duty_pass;
             printed = 1;
         end
     end
@@ -103,50 +109,104 @@ module tb_clk_wiz_0;
   
 
 
-  print_freq_after_lock print_freq_after_lockin1(
+  // input frequency tests
+  print_freq_after_lock #(.expected_freq(100.0), .expected_duty(50.0)) print_freq_after_lockin1(
     .name("clk_in1"),
     .clk(clk_in1),
-    .locked(locked)
+    .locked(locked),
+    .pass(pass_in1)
   );
-  print_freq_after_lock print_freq_after_lockin2(
+  print_freq_after_lock #(.expected_freq(125.0), .expected_duty(50.0)) print_freq_after_lockin2(
     .name("clk_in2"),
     .clk(clk_in2),
-    .locked(locked)
+    .locked(locked),
+    .pass(pass_in2)
   );
-  print_freq_after_lock print_freq_after_lockout1(
+  // output frequency tests 0: 100 MHz in
+  print_freq_after_lock #(.expected_freq(1.25*100.0), .expected_duty(50.0)) print_freq_after_lockout1_0(
     .name("clk_out1"),
     .clk(clk_out1),
-    .locked(locked)
+    .locked(!clk_in_sel & locked),
+    .pass(pass_out1_0)
   );
-  print_freq_after_lock print_freq_after_lockout2(
+  print_freq_after_lock #(.expected_freq(1.25*100.0), .expected_duty(50.0)) print_freq_after_lockout2_0(
     .name("clk_out2"),
     .clk(clk_out2),
-    .locked(locked)
+    .locked(!clk_in_sel & locked),
+    .pass(pass_out2_0)
   );
-  print_freq_after_lock print_freq_after_lockout3(
+  print_freq_after_lock #(.expected_freq(1.25*100.0), .expected_duty(27.8)) print_freq_after_lockout3_0(
     .name("clk_out3"),
     .clk(clk_out3),
-    .locked(locked)
+    .locked(!clk_in_sel & locked),
+    .pass(pass_out3_0)
   );
-  print_freq_after_lock print_freq_after_lockout4(
+  print_freq_after_lock #(.expected_freq(1.25*100.0), .expected_duty(77.8)) print_freq_after_lockout4_0(
     .name("clk_out4"),
     .clk(clk_out4),
-    .locked(locked)
+    .locked(!clk_in_sel & locked),
+    .pass(pass_out4_0)
   );
-  print_freq_after_lock print_freq_after_lockout5(
+  print_freq_after_lock #(.expected_freq(1.25*33.333), .expected_duty(50.0)) print_freq_after_lockout501(
     .name("clk_out5"),
     .clk(clk_out5),
-    .locked(locked)
+    .locked(!clk_in_sel & locked),
+    .pass(pass_out5_0)
   );
-  print_freq_after_lock print_freq_after_lockout6(
+  print_freq_after_lock #(.expected_freq(1.25*150.0), .expected_duty(50.0)) print_freq_after_lockout6_0(
     .name("clk_out6"),
     .clk(clk_out6),
-    .locked(locked)
+    .locked(!clk_in_sel & locked),
+    .pass(pass_out6_0)
   );
-  print_freq_after_lock print_freq_after_lockout7(
+  print_freq_after_lock #(.expected_freq(1.25*225.0), .expected_duty(50.0)) print_freq_after_lockout7_0(
     .name("clk_out7"),
     .clk(clk_out7),
-    .locked(locked)
+    .locked(!clk_in_sel & locked),
+    .pass(pass_out7_0)
+  );
+  // output frequency tests 1: 125 MHz in
+  print_freq_after_lock #(.expected_freq(100.0), .expected_duty(50.0)) print_freq_after_lockout1_1(
+    .name("clk_out1"),
+    .clk(clk_out1),
+    .locked(clk_in_sel & locked),
+    .pass(pass_out1_1)
+  );
+  print_freq_after_lock #(.expected_freq(100.0), .expected_duty(50.0)) print_freq_after_lockout2_1(
+    .name("clk_out2"),
+    .clk(clk_out2),
+    .locked(clk_in_sel & locked),
+    .pass(pass_out2_1)
+  );
+  print_freq_after_lock #(.expected_freq(100.0), .expected_duty(27.8)) print_freq_after_lockout3_1(
+    .name("clk_out3"),
+    .clk(clk_out3),
+    .locked(clk_in_sel & locked),
+    .pass(pass_out3_1)
+  );
+  print_freq_after_lock #(.expected_freq(100.0), .expected_duty(77.8)) print_freq_after_lockout4_1(
+    .name("clk_out4"),
+    .clk(clk_out4),
+    .locked(clk_in_sel & locked),
+    .pass(pass_out4_1)
+  );
+  print_freq_after_lock #(.expected_freq(33.333), .expected_duty(50.0)) print_freq_after_lockout5_1(
+    .name("clk_out5"),
+    .clk(clk_out5),
+    .locked(clk_in_sel & locked),
+    .pass(pass_out5_1)
+  );
+  print_freq_after_lock #(.expected_freq(150.0), .expected_duty(50.0)) print_freq_after_lockout6_1(
+    .name("clk_out6"),
+    .clk(clk_out6),
+    .locked(clk_in_sel & locked),
+    .pass(pass_out6_1)
+  );
+  print_freq_after_lock #(.expected_freq(225.0), .expected_duty(50.0)) print_freq_after_lockout7_1(
+    .name("clk_out7"),
+    .clk(clk_out7),
+    .locked(clk_in_sel & locked),
+    .pass(pass_out7_1)
   );
   //==========================================================================
   // Test sequence
@@ -176,7 +236,15 @@ module tb_clk_wiz_0;
     $display("[%0t] MMCM locked",$time);
     #1000;
     $display("[%0t] END simulation",$time);
-    $finish;
+    if (pass_in1 && 
+    pass_out1_0 && pass_out2_0 && pass_out3_0 && pass_out4_0 && pass_out5_0 && pass_out6_0 && pass_out7_0 &&
+    pass_in2 && pass_out1_1 && pass_out2_1 && pass_out3_1 && pass_out4_1 && pass_out5_1 && pass_out6_1 && pass_out7_1) begin
+      $display("[%0t] ALL TESTS PASSED",$time);
+      $finish;
+    end else begin
+      $display("[%0t] SOME TESTS FAILED",$time);
+      $fatal;
+    end
   end
 
   // simple monitor

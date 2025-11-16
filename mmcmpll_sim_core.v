@@ -9,7 +9,8 @@
 // - Models reset/lock: lock asserts after a stabilization time when input clock is present and params valid.
 // - Generates ps-accurate clocks with phase and duty via delays
 // Difference from hardware:
-// - Real HW: MMCM emits a single-cycle on all clocks on initialize or after reset
+// - Real HW: MMCM emits a single-cycle on all clocks on initialize or after reset. 
+// - Real HW: On first cycle, real HW doesn't emit clipped pulses even with phase shifts or duty cycles.
 // - Real HW: phase shifts and duty cycles are not 100% accurate, but with roundings, the round amount depends on frequency
 // - Real HW: when feedback disconnects, output still presents. 
 // - Real HW: has dynamic phase shift and dynamic reconfiguration
