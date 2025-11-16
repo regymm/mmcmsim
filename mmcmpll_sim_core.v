@@ -1,17 +1,31 @@
 // SPDX-License-Identifier: MIT
-`timescale 1ns/1ps
+// Author: regymm
+`timescale 1ps/1ps
 
 // Behavioral simulation model approximating Xilinx MMCME2_ADV / PLLE2_ADV
 // - Matches MMCME2_ADV parameters and ports. Unsupported ports are present but ignored.
 // - Computes VCO frequency and output clocks using Xilinx formulas.
-// - Parameter limits checking (7-series typical). Emits $error on violations.
+// - Basic parameter limits checking (7-series typical). Only allows clksel to change when reset is high.
 // - Models reset/lock: lock asserts after a stabilization time when input clock is present and params valid.
-// - Generates real-time clocks with phase and duty via delays
+// - Generates ps-accurate clocks with phase and duty via delays
 // Difference from hardware:
 // - Real HW: MMCM emits a single-cycle on all clocks on initialize or after reset
 // - Real HW: phase shifts and duty cycles are not 100% accurate, but with roundings, the round amount depends on frequency
 // - Real HW: when feedback disconnects, output still presents. 
 // - Real HW: has dynamic phase shift and dynamic reconfiguration
+
+// Phase and duty cycle accuracy rules observed from clocking wizard:
+// - min_phase/360 * DIV = 1/8
+// - min_duty_cycle% * DIV = 1
+// - min_duty_cycle_increase% * DIV = 1/2
+// E.g. 400 MHz output, VCO=800MHz, DIV=2
+// - min_phase = 1/8 * 1/2 * 360 = 22.5, 22.5*N phase is available
+// - min_duty_cycle = 1 * 1/2 * 100 = 50, less than 50% is not available
+// - min_duty_cycle_increase = 1/2 * 1/2 * 100 = 25, so 50, 75 is available
+// E.g. 100 MHz in and out, want maximum duty cycle
+// - VCO optimized to be 1100 MHz, DIV=11
+// - min_duty_cycle_increase = 1/2 * 1/11 * 100 = 4.545%, so maximum duty cycle is 1 - 4.545% = 95.4545%
+// - If there's no duty cycle requirement, VCO will be optimized to be 1000 MHz in clkwiz. 
 
 
 module mmcmpll_sim_core #(
@@ -121,29 +135,44 @@ module mmcmpll_sim_core #(
     real input_freq_mhz;
     real vco_freq_mhz;
     real vco_period_ns;
+    real vco_period_ps_r;   // ps
+    real vco_sub_ps_r;      // ps (VCO/8)
+    time vco_sub_ps_floor;  // integer ps base delay
+    real vco_sub_ps_frac;   // fractional ps part [0,1)
+    real vco_sub_ps_acc;    // fractional error accumulator
 
     // Derived output periods (use unpacked arrays with indices handled manually for plain Verilog)
     real out_period_ns [0:6];
     real out_high_ns   [0:6];
     real out_phase_ns  [0:6];
 
+    // Quantized output parameters in 1/8 VCO substeps
+    integer out_period_x8 [0:6];   // = round(div*8)
+    integer out_high_x8   [0:6];   // multiple of 4, clamped to [min, max]
+    integer out_phase_x8  [0:6];   // 0..period-1
+    integer out_pos_x8    [0:6];   // running phase accumulator 0..period-1
+
     // Parameter limits (7-series typical)
-    // MMCME2 VCO range: 600..1200 MHz (per UG472). Some devices allow up to 1440/1600; use 600..1200 conservative.
+    // MMCME2 VCO range: 600..1200 MHz (per UG472). Some devices allow up to 1440/1600
     real VCO_MIN_MHZ = 600.0;
     real VCO_MAX_MHZ = 1200.0;
-    // Input clock 10 MHz..800 MHz typical (we allow 5..800 for flexibility if wizard sets).
+    // Input clock 10 MHz..800 MHz typical (start from 5.0?)
     real CIN_MIN_MHZ  = 10.0;
     real CIN_MAX_MHZ  = 800.0;
 
     // Lock modeling
-    time lock_delay_ps = 0;  // computed based on input period and a small constant
-    time last_reset_deassert_ps = 0;
+    time lock_delay_ps = 436_100;  // Similar to modelsim lock delay
 
     // Helpers
     function real maxr(input real a, input real b); maxr = (a>b)?a:b; endfunction
     function real minr(input real a, input real b); minr = (a<b)?a:b; endfunction
+    function integer round_real_to_int(input real r);
+        begin
+            if (r >= 0.0) round_real_to_int = $rtoi(r + 0.5);
+            else          round_real_to_int = -$rtoi(-r + 0.5);
+        end
+    endfunction
 
-    // Compute frequency and generate clocks when locked
     integer i;
     reg feedback_ok;
     reg rst_sync;
@@ -189,6 +218,8 @@ module mmcmpll_sim_core #(
         real phases [0:6];
         real dutys  [0:6];
         integer k;
+        integer min_high8, step8, req_high8;
+        integer req_phase8;
         begin
             // Select input period
             if (CLKINSEL === 1'b1) begin
@@ -206,6 +237,11 @@ module mmcmpll_sim_core #(
             else
                 vco_freq_mhz = 0.0;
             vco_period_ns = (vco_freq_mhz>0.0) ? (1000.0 / vco_freq_mhz) : 0.0;
+            vco_period_ps_r = (vco_freq_mhz>0.0) ? (1.0e6 / vco_freq_mhz) : 0.0;
+            vco_sub_ps_r    = vco_period_ps_r / 8.0; // 1/8 VCO sub-tick
+            vco_sub_ps_floor = vco_sub_ps_r; // trunc to integer ps
+            vco_sub_ps_frac  = vco_sub_ps_r - vco_sub_ps_floor;
+            vco_sub_ps_acc   = 0.0;
 
             // Collect output dividers
             divs[0] = (CLKOUT0_DIVIDE_F < 1.0) ? 1.0 : CLKOUT0_DIVIDE_F;
@@ -227,12 +263,49 @@ module mmcmpll_sim_core #(
             for (k=0;k<7;k=k+1) begin
                 if (vco_period_ns>0.0) begin
                     out_period_ns[k] = vco_period_ns * divs[k];
-                    out_high_ns[k]   = maxr(1.0, out_period_ns[k] * minr(maxr(dutys[k],0.0),1.0));
-                    out_phase_ns[k]  = (phases[k] % 360.0) * out_period_ns[k] / 360.0;
+                    // Bound inputs
+                    dutys[k]  = minr(maxr(dutys[k],0.0),1.0);
+                    phases[k] = phases[k] - 360.0 * $floor(phases[k]/360.0);
+                    // Quantize to 1/8-VCO substeps per constraints (see header lines 16-27)
+                    // - Period in substeps: DIV*8, fractional DIV allowed only for CLKOUT0 on MMCME2_ADV
+                    // - Usually, DIVs are always integers
+                    if (k==0) out_period_x8[k] = (divs[k] < 1.0) ? 8 : round_real_to_int(divs[k]*8.0);
+                    else      out_period_x8[k] = round_real_to_int($floor(divs[k]+0.5)*8.0);
+                    if (out_period_x8[k] < 8) out_period_x8[k] = 8; // minimum
+
+                    // Duty cycle quantization
+                    // - Minimum high and low each 1 VCO cycle (8 substeps) when period>=16; otherwise force 50%
+                    if (out_period_x8[k] >= 16) begin
+                        min_high8 = 8;    // 1 VCO cycle
+                        step8     = 4;    // 1/2 VCO cycle increments
+                        req_high8 = round_real_to_int(dutys[k]*out_period_x8[k]);
+                        // quantize to nearest multiple of step8
+                        req_high8 = (req_high8/step8)*step8 + (((req_high8%step8) >= (step8/2)) ? step8 : 0);
+                        if (req_high8 < min_high8) req_high8 = min_high8;
+                        if (req_high8 > out_period_x8[k]-min_high8) req_high8 = out_period_x8[k]-min_high8;
+                    end else begin
+                        // For very small divisors, only 50% duty is realizable
+                        min_high8 = out_period_x8[k]/2;
+                        req_high8 = min_high8;
+                    end
+                    out_high_x8[k] = req_high8;
+
+                    // Phase quantization: step = 1 substep (VCO/8)
+                    req_phase8 = round_real_to_int((phases[k] * out_period_x8[k]) / 360.0);
+                    // wrap into range [0, period-1]
+                    req_phase8 = req_phase8 % out_period_x8[k];
+                    if (req_phase8 < 0) req_phase8 = req_phase8 + out_period_x8[k];
+                    out_phase_x8[k] = req_phase8;
+                    // For reporting only
+                    out_high_ns[k]   = (out_high_x8[k]   * (vco_period_ns/8.0));
+                    out_phase_ns[k]  = (out_phase_x8[k]  * (vco_period_ns/8.0));
                 end else begin
                     out_period_ns[k] = 0.0;
                     out_high_ns[k]   = 0.0;
                     out_phase_ns[k]  = 0.0;
+                    out_period_x8[k] = 8;
+                    out_high_x8[k]   = 4;
+                    out_phase_x8[k]  = 0;
                 end
             end
             check_params();
@@ -244,12 +317,10 @@ module mmcmpll_sim_core #(
             $display("CLKOUT4 CALCULATED period_ns = %0.3f ( MHz = %0.3f ), out_high_ns = %0.3f, out_phase_ns = %0.3f", out_period_ns[4], 1000.0/out_period_ns[4], out_high_ns[4], out_phase_ns[4]);
             $display("CLKOUT5 CALCULATED period_ns = %0.3f ( MHz = %0.3f ), out_high_ns = %0.3f, out_phase_ns = %0.3f", out_period_ns[5], 1000.0/out_period_ns[5], out_high_ns[5], out_phase_ns[5]);
             $display("CLKOUT6 CALCULATED period_ns = %0.3f ( MHz = %0.3f ), out_high_ns = %0.3f, out_phase_ns = %0.3f", out_period_ns[6], 1000.0/out_period_ns[6], out_high_ns[6], out_phase_ns[6]);
-
-            lock_delay_ps = 436_100; 
         end
     endtask
 
-    // Compute parameters initially
+    // Compute parameters initially, and recompute when input clk freq changes when CLKINSEL changes
     initial begin
         CLKFBOUT = 1'b0;
         CLKOUT0 = 1'b0;
@@ -266,139 +337,78 @@ module mmcmpll_sim_core #(
         recompute_params();
     end
 
-    // Track deassert of reset
-    always @(negedge RST) begin
-        last_reset_deassert_ps = $time;
+    // Sub-tick (VCO/8) generator using ps-resolution with fractional error cancellation
+    // Generate forever; outputs consume only when LOCKED
+    reg vco_subtick = 1'b0;
+    time dly_ps;
+    real timejump_ps;
+    initial begin
+        forever begin
+            if (vco_sub_ps_floor == 0) begin
+                // If not configured, wait a little to avoid busy loop
+                #1000;
+            end else begin
+                timejump_ps = (vco_sub_ps_acc + vco_sub_ps_frac) >= 0.5 ? 1 :((vco_sub_ps_acc + vco_sub_ps_frac) <= -0.5 ? -1 : 0);
+                dly_ps = vco_sub_ps_floor + timejump_ps;
+                vco_sub_ps_acc = (vco_sub_ps_acc + vco_sub_ps_frac) - timejump_ps;
+                #(dly_ps);
+                vco_subtick <= 1'b1;
+                // zero-time fall to create a posedge
+                #0 vco_subtick <= 1'b0;
+            end
+        end
     end
 
-    // Simple lock state machine (plain Verilog encoding)
-    localparam S_WAIT_FB   = 1;
-    localparam S_WAIT_LOCK = 2;
-    localparam S_LOCKED    = 3;
-    integer st;
-    initial st = S_WAIT_FB;
-
-    task automatic clk_calc(input real period_ns, input real high_ns, input real phase_ns, 
-                           output time t_high_out, output time t_low_out, output time t_phase_out);
-        begin
-            t_high_out = (high_ns>0.0)? high_ns : 0;
-            t_low_out  = (period_ns>0.0)? (period_ns - t_high_out) : 0;
-            t_phase_out= (phase_ns>0.0)? phase_ns : 0;
-        end
-    endtask
-
-    // Main lock/clock control
+    // lock control
     always @(*) begin
         if (RST) begin
             #1; LOCKED = 1'b0;
-            st = S_WAIT_FB;
         end else begin
-            case (st)
-                S_WAIT_FB: begin
-                    if (feedback_ok) begin
-                        st = S_WAIT_LOCK;
-                        // schedule lock assertion after delay
-                        #(lock_delay_ps/1000);
-                        if (!RST && feedback_ok && input_freq_mhz>0.0) begin
-                            LOCKED = 1'b1;
-                            st = S_LOCKED;
-                            fork
-                            // CLKOUT0 generator
-                            begin
-                                time t_h, t_l, t_p;
-                                clk_calc(out_period_ns[0], out_high_ns[0], out_phase_ns[0], t_h, t_l, t_p);
-                                if (t_p>0) #(t_p);
-                                while (LOCKED) begin
-                                    CLKOUT0 = 1'b1; #(t_h);
-                                    CLKOUT0 = 1'b0; #(t_l);
-                                end
-                                CLKOUT0 = 1'b0;
-                            end
-                            // CLKOUT1 generator
-                            begin
-                                time t_h, t_l, t_p;
-                                clk_calc(out_period_ns[1], out_high_ns[1], out_phase_ns[1], t_h, t_l, t_p);
-                                if (t_p>0) #(t_p);
-                                while (LOCKED) begin
-                                    CLKOUT1 = 1'b1; #(t_h);
-                                    CLKOUT1 = 1'b0; #(t_l);
-                                end
-                                CLKOUT1 = 1'b0;
-                            end
-                            // CLKOUT2 generator
-                            begin
-                                time t_h, t_l, t_p;
-                                clk_calc(out_period_ns[2], out_high_ns[2], out_phase_ns[2], t_h, t_l, t_p);
-                                if (t_p>0) #(t_p);
-                                while (LOCKED) begin
-                                    CLKOUT2 = 1'b1; #(t_h);
-                                    CLKOUT2 = 1'b0; #(t_l);
-                                end
-                                CLKOUT2 = 1'b0;
-                            end
-                            // CLKOUT3 generator
-                            begin
-                                time t_h, t_l, t_p;
-                                clk_calc(out_period_ns[3], out_high_ns[3], out_phase_ns[3], t_h, t_l, t_p);
-                                if (t_p>0) #(t_p);
-                                while (LOCKED) begin
-                                    CLKOUT3 = 1'b1; #(t_h);
-                                    CLKOUT3 = 1'b0; #(t_l);
-                                end
-                                CLKOUT3 = 1'b0;
-                            end
-                            // CLKOUT4 generator
-                            begin
-                                time t_h, t_l, t_p;
-                                clk_calc(out_period_ns[4], out_high_ns[4], out_phase_ns[4], t_h, t_l, t_p);
-                                if (t_p>0) #(t_p);
-                                while (LOCKED) begin
-                                    CLKOUT4 = 1'b1; #(t_h);
-                                    CLKOUT4 = 1'b0; #(t_l);
-                                end
-                                CLKOUT4 = 1'b0;
-                            end
-                            // CLKOUT5 generator
-                            begin
-                                time t_h, t_l, t_p;
-                                clk_calc(out_period_ns[5], out_high_ns[5], out_phase_ns[5], t_h, t_l, t_p);
-                                if (t_p>0) #(t_p);
-                                while (LOCKED) begin
-                                    CLKOUT5 = 1'b1; #(t_h);
-                                    CLKOUT5 = 1'b0; #(t_l);
-                                end
-                                CLKOUT5 = 1'b0;
-                            end
-                            // CLKOUT6 generator
-                            begin
-                                time t_h, t_l, t_p;
-                                clk_calc(out_period_ns[6], out_high_ns[6], out_phase_ns[6], t_h, t_l, t_p);
-                                if (t_p>0) #(t_p);
-                                while (LOCKED) begin
-                                    CLKOUT6 = 1'b1; #(t_h);
-                                    CLKOUT6 = 1'b0; #(t_l);
-                                end
-                                CLKOUT6 = 1'b0;
-                            end
-                            // CLKFBOUT generator (feedback approximate with selected input clock)
-                            begin
-                                time t_h, t_l, t_p;
-                                clk_calc(input_period_ns, input_period_ns/2, 0.0, t_h, t_l, t_p);
-                                if (t_p>0) #(t_p);
-                                while (LOCKED) begin
-                                    CLKFBOUT = 1'b1; #(t_h);
-                                    CLKFBOUT = 1'b0; #(t_l);
-                                end
-                                CLKFBOUT = 1'b0;
-                            end
-                            join_none
-                        end
-                    end
+            // schedule lock assertion after delay (ps timescale)
+            #(lock_delay_ps);
+            if (!RST && feedback_ok && input_freq_mhz>0.0) begin
+                LOCKED = 1'b1;
+            end
+        end
+    end
+
+    // Initialize positions and outputs on lock changes
+    integer kk;
+    always @(posedge LOCKED or negedge LOCKED) begin
+        if (!LOCKED) begin
+            CLKOUT0 = 1'b0; CLKOUT1 = 1'b0; CLKOUT2 = 1'b0;
+            CLKOUT3 = 1'b0; CLKOUT4 = 1'b0; CLKOUT5 = 1'b0; CLKOUT6 = 1'b0;
+            CLKFBOUT = 1'b0;
+            for (kk=0; kk<7; kk=kk+1) begin
+                out_pos_x8[kk] = 0;
+            end
+        end else begin
+            for (kk=0; kk<7; kk=kk+1) begin
+                // Start at quantized phase
+                out_pos_x8[kk] = out_period_x8[kk] - (out_phase_x8[kk] % ((out_period_x8[kk] > 0)? out_period_x8[kk] : 1));
+                // $display("out_phase_x8[%d] = %d", kk, out_period_x8[kk]);
+            end
+        end
+    end
+
+    // CLKOUTs
+    always @(posedge vco_subtick) begin
+        if (LOCKED) begin
+            integer j;
+            for (j=0; j<7; j=j+1) begin
+                if (out_period_x8[j] > 0) begin
+                    out_pos_x8[j] = (out_pos_x8[j] + 1 >= out_period_x8[j]) ? 0 : (out_pos_x8[j] + 1);
+                    case (j)
+                        0: CLKOUT0 = out_pos_x8[0] < out_high_x8[0];
+                        1: CLKOUT1 = out_pos_x8[1] < out_high_x8[1];
+                        2: CLKOUT2 = out_pos_x8[2] < out_high_x8[2];
+                        3: CLKOUT3 = out_pos_x8[3] < out_high_x8[3];
+                        4: CLKOUT4 = out_pos_x8[4] < out_high_x8[4];
+                        5: CLKOUT5 = out_pos_x8[5] < out_high_x8[5];
+                        6: CLKOUT6 = out_pos_x8[6] < out_high_x8[6];
+                    endcase
                 end
-                S_WAIT_LOCK: begin
-                    // no-op; wait till RST
-                end
-            endcase
+            end
         end
     end
 

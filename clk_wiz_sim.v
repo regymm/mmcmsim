@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Author: regymm
 `timescale 1ns / 1ps
 
 module print_freq_after_lock #(
@@ -19,25 +21,33 @@ module print_freq_after_lock #(
   real falling_edge;
   real freq = -1;
   real duty = -1;
-  reg last_locked = 0;
+  reg printed = 0;
+  integer i;
+  integer cycles_to_measure = 10;
   always @ (posedge clk) begin
-    if (locked & !last_locked) begin
+    if (locked & !printed) begin
         @(posedge clk);
         @(posedge clk);
         rising_edge = $realtime;
         @(negedge clk) falling_edge = $realtime;
         @(posedge clk) begin
-            freq = 1.0e3/($realtime - rising_edge);
             duty = 100*(1-($realtime-falling_edge)/($realtime-rising_edge));
+            for (i = 0; i < cycles_to_measure - 1; i = i + 1) begin
+                @(posedge clk);
+            end
+            freq = 1.0e3 * cycles_to_measure / ($realtime - rising_edge);
             $display("%s: frequency %0.3f MHz, duty cycle %0.3f%%.", 
             name, freq, duty);
             if (expected_freq > 0 && abs(expected_freq - freq) > allowed_err) $display("WARNING: %s frequency deviated from expectation, %0.3f instead of %0.3f!", 
                 name, freq, expected_freq);
             if (expected_duty > 0 && abs(expected_duty - duty) > allowed_err) $display("WARNING: %s duty cycle deviated from expectation, %0.3f instead of %0.3f!", 
                 name, duty, expected_duty);
+            printed = 1;
         end
     end
-    last_locked <= locked;
+  end
+  always @ (*) begin
+    if (!locked) printed = 0;
   end
 endmodule
 
@@ -227,7 +237,7 @@ wire clk_in2_clk_wiz_0;
     .CLKFBOUT_MULT_F      (9.000),
     .CLKFBOUT_PHASE       (0.000),
     .CLKFBOUT_USE_FINE_PS ("FALSE"),
-    .CLKOUT0_DIVIDE_F     (9.000*2),
+    .CLKOUT0_DIVIDE_F     (9.000),
     .CLKOUT0_PHASE        (0.000),
     .CLKOUT0_DUTY_CYCLE   (0.500),
     .CLKOUT0_USE_FINE_PS  ("FALSE"),
