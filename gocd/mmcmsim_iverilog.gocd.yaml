@@ -1,0 +1,30 @@
+format_version: 10
+pipelines:
+  mmcmsim_iverilog:
+    group: MyGroup
+    label_template: ${COUNT}
+    lock_behavior: none
+    display_order: -1
+    materials:
+      git-a34832c:
+        git: https://github.com/regymm/mmcmsim
+        shallow_clone: false
+        auto_update: true
+        branch: main
+    stages:
+    - Test:
+        fetch_materials: true
+        keep_artifacts: false
+        clean_workspace: false
+        approval:
+          type: success
+          allow_only_on_success: false
+        jobs:
+          iverilog:
+            timeout: 0
+            resources:
+            - MyIVerilogResource
+            tasks:
+            - exec:
+                command: ./iverilog.sh
+                run_if: passed
