@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: MIT
+# Generated from https://github.com/FPGAOL-CE/caas-wizard
+#
+BUILDDIR := ${CURDIR}/build
+
+LOGFILE := ${BUILDDIR}/top.log
+
+# Build design
+all: ${BUILDDIR}/mmcm_boolean_led_demo.bit
+
+${BUILDDIR}:
+	mkdir -m 777 -p ${BUILDDIR} && chown -R nobody ${BUILDDIR} | true
+
+.ONESHELL: 
+${BUILDDIR}/vivado.tcl: ${BUILDDIR}
+	cat << EOF > $@
+	# vivado.tcl generated for FPGAOL-CE/caas-wizard
+	# can be launched from any directory
+	cd ${BUILDDIR}
+	create_project -part xc7s50csga324-1 -force v_proj
+	set_property target_language Verilog [current_project]
+	cd ..
+	read_verilog [glob *.v]
+	read_xdc [glob  $(wildcard *.xdc)  $(wildcard *.pcf)  $(wildcard *.lpf)  $(wildcard *.cst) ]
+	cd build
+	synth_design -top mmcm_boolean_led_demo
+	opt_design
+	place_design
+	phys_opt_design
+	route_design
+	write_bitstream -verbose -force mmcm_boolean_led_demo.bit
+	# report_utilization -file util.rpt
+	# report_timing_summary -file timing.rpt
+	EOF
+
+${BUILDDIR}/mmcm_boolean_led_demo.bit: ${BUILDDIR}/vivado.tcl
+	cd ${BUILDDIR} && vivado -mode batch -source $< > ${LOGFILE} 2>&1
+
+.PHONY: clean
+clean:
+	rm -rf ${BUILDDIR}
